@@ -5,15 +5,15 @@ import sys
 import os
 import random
 import re
-import pickle
+import time
 import numpy as np
 from PIL import Image
 import tensorflow as tf
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-MINI_BATCH_SIZE = 100
-LEARNING_RATE = 0.5
-EPOCH = 15
+MINI_BATCH_SIZE = 5
+LEARNING_RATE = 0.001
+EPOCH = 5
 
 
 class CONVNET(object):
@@ -38,8 +38,10 @@ class CONVNET(object):
         """
 
         self.cost = cost
-        self.epsilon = float(epsilon)
-        self.max_updates = int(max_updates)
+        global LEARNING_RATE
+        global EPOCH
+        LEARNING_RATE = float(epsilon)
+        EPOCH = int(max_updates)
         self.class_letter = class_letter
         self.input = []
         self.labels = []
@@ -89,10 +91,10 @@ class CONVNET(object):
                 self.input.append(img_array)
                 # Check if filename matches training class filename pattern
                 if pos_pattern.match(filename):
-                    self.labels.append([1, 0])
+                    self.labels.append([0, 1])
                 # Check if filename matches negative input class pattern
                 elif neg_pattern.match(filename):
-                    self.labels.append([0, 1])
+                    self.labels.append([1, 0])
 
         # Check if folders are empty
         if is_empty is True:
@@ -114,12 +116,14 @@ class CONVNET(object):
         # Open image using PIL
         image = Image.open(path, 'r')
         # print path
-        # Convert to numpy array
-        img_array = np.array(image).astype('uint8')
-        # Reshape array to one dimension
-        img_array = img_array.reshape(-1)
-        # img_array /= 255
+
+        img_array = np.array(image.getdata()).reshape(
+            image.size[0], image.size[1], 1)
         img_array = img_array.tolist()
+        # Reshape array to one dimension
+        # img_array = img_array.reshape(-1)
+        # img_array /= 255
+        # img_array = img_array.tolist()
         # print img_array
         # exit()
         return img_array
@@ -141,7 +145,67 @@ class CONVNET(object):
             label[i] = label[j]
             label[j] = temp
 
-    def train(self, model_file='trained_model', data=None, model_params=None):
+    def cross_validation(self, k, model_file):
+        """Performs a k-fold cross validation training and testing
+
+        :params k: k-fold cross validation
+        :param model_file: File to which model is written and then read
+        :returns: Returns nothing
+        """
+
+        x, y, train_step, logits, acc = self.__initialize_variables("train")
+
+        params = {}
+        params['accuracy'] = acc
+        params['train_step'] = train_step
+        params['x'] = x
+        params['y'] = y
+        params['out_layer'] = logits
+
+        subset_size = len(self.input) / k
+        input_subsets = []
+        label_subsets = []
+        for i in range(0, len(self.input), subset_size):
+            subset = self.input[i: i + subset_size]
+            input_subsets.append(subset)
+            subset = self.labels[i: i + subset_size]
+            label_subsets.append(subset)
+
+        accuracy_sum = 0
+        train_dur = 0
+        test_dur = 0
+
+        for j in range(k):
+            input_train_set = []
+            label_train_set = []
+            input_test_set = []
+            label_test_set = []
+            for i in range(k):
+                if i != j:
+                    input_train_set.extend(input_subsets[i])
+                    label_train_set.extend(label_subsets[i])
+                else:
+                    input_test_set = input_subsets[i]
+                    label_test_set = label_subsets[i]
+
+            train_dur += self.train(params, input_train_set,
+                                    label_train_set, model_file)
+
+            accur, matrix, dur = self.test(
+                model_file, input_test_set, label_test_set, params)
+
+            accuracy_sum += accur
+            test_dur += dur
+
+        print "Processing complete!"
+        print "Total no. of items trained and tested: %s" % len(self.input)
+        print "Overall Accuracy over testing data: %s" % (accuracy_sum / k)
+        print "Training time: %s seconds" % train_dur
+        print "Testing time: %s seconds" % test_dur
+        print "Confusion Matrix: "
+        print matrix
+
+    def train(self, model_params, data, labels, model_file='trained_model'):
         """Trains the Neural Net on data folder
 
         :param model_file: File to which model is written
@@ -149,18 +213,93 @@ class CONVNET(object):
         :param model_params: Tensorflow Model parameters
         :returns: Time taken to train
         """
+        start_time = time.time()
 
-        self.__initialize_variable()
+        x = model_params['x']
+        y = model_params['y']
+        train_step = model_params['train_step']
 
-    def __initialize_variable(self):
+        # Global Initializer
+        init = tf.global_variables_initializer()
+
+        # Initialize the TensorFlow session
+        sess = tf.InteractiveSession()
+        sess.run(init)
+
+        for i in range(EPOCH):
+            print "EPOCH: ", i + 1
+            counter = 0
+            for k in range(0, len(data), MINI_BATCH_SIZE):
+                batch_xs = data[k:k + MINI_BATCH_SIZE]
+                batch_ys = labels[k:k + MINI_BATCH_SIZE]
+                sess.run(train_step, feed_dict={
+                    x: batch_xs, y: batch_ys
+                })
+                counter += len(batch_xs)
+                if (counter) % 1000 == 0:
+                    print str(counter) + " inputs trained."
+
+        print "Processing complete!!"
+        # Save model to file
+        saver = tf.train.Saver()
+        saver.save(sess, model_file)
+
+        return time.time() - start_time
+
+    def test(self, model_file, data=None, labels=None, params=None):
+        """Test the Neural Network"""
+
+        if data is None:
+            x, y, accuracy, out_layer = self.__initialize_variables('test')
+            data = self.input
+            labels = self.labels
+        else:
+            x = params['x']
+            y = params['y']
+            out_layer = params['out_layer']
+            accuracy = params['accuracy']
+
+        sess = tf.Session()
+        saver = tf.train.Saver()
+        saver.restore(sess, model_file)
+        print ("Model restored!")
+
+        start_time = time.time()
+
+        test_accuracy = accuracy.eval(session=sess, feed_dict={
+            x: data, y: labels})
+
+        prediction = tf.argmax(out_layer, 1)
+        actual = tf.argmax(labels, 1)
+        pred, act = sess.run([prediction, actual], feed_dict={
+            x: data, y: labels})
+
+        confusion_matrix = tf.contrib.metrics.confusion_matrix(
+            act, pred).eval(session=sess)
+
+        duration = time.time() - start_time
+
+        if params is None:
+            print "Total number of items tested on: %s" % len(data)
+            print "Overall Accuracy over testing data: %s" % test_accuracy
+            print "Testing time: %s seconds" % duration
+            print "Confusion Matrix: "
+            print confusion_matrix
+        else:
+            print "Number of items tested on: %s" % len(data)
+            print "Accuracy over testing data: %s" % test_accuracy
+
+        return test_accuracy, confusion_matrix, duration
+
+    def __initialize_variables(self, mode):
         """Initializes Tensorflow variable
 
-        :param mode: Mode in which script is run (train,test,k-fold)
+        :param mode: Mode in which script is run (train,test)
         :returns: Train step, input, label, accuracy Tensor depending on mode
         """
 
         # Input
-        x = tf.placeholder(tf.float32, [None, 625], name='x')
+        x = tf.placeholder(tf.float32, [None, 25, 25, 1], name="x")
 
         # Label
         y = tf.placeholder(tf.float32, [None, 2], name="y")
@@ -179,7 +318,52 @@ class CONVNET(object):
             out_layer = self.__get_conv(out_layer, W[i], b[i], network[i][0])
             prev_dim = network[i][1]
 
-        print network[-1]
+        i = len(network) - 1
+
+        reshape_val = out_layer.get_shape().as_list()[1]
+        # Flatten max_pool
+        out_layer = tf.reshape(
+            out_layer, [-1, reshape_val * reshape_val * prev_dim])
+
+        W[i], b[i] = self.__get_wb(i, reshape_val, prev_dim,
+                                   network[i][0], 'dense')
+        out_layer = self.__get_dense(out_layer, W[i], b[i], 'relu')
+        prev_dim = network[i][0]
+
+        i = i + 1
+
+        # Output layer with sigmoid activation
+        W[i], b[i] = self.__get_wb(i, 1, prev_dim, 2, 'dense')
+        out_layer = self.__get_dense(out_layer, W[i], b[i], '')
+
+        reg_dict = {
+            'cross': tf.contrib.layers.apply_regularization(
+                tf.contrib.layers.l1_regularizer(0.0),  W.values()),
+            "cross-l1": tf.contrib.layers.apply_regularization(
+                tf.contrib.layers.l1_regularizer(0.01), W.values()),
+            "cross-l2":  tf.contrib.layers.apply_regularization(
+                tf.contrib.layers.l2_regularizer(0.01), W.values()),
+            "ctest": 0
+        }
+
+        reg = reg_dict[self.cost]
+
+        cost = tf.nn.softmax_cross_entropy_with_logits(
+            logits=out_layer, labels=y) + reg
+
+        out_layer = tf.nn.softmax(out_layer)
+
+        prediction = tf.equal(tf.argmax(out_layer, 1), tf.argmax(y, 1))
+        accuracy = tf.reduce_mean(tf.cast(prediction, tf.float32),
+                                  name='accuracy')
+
+        train_step = tf.train.GradientDescentOptimizer(
+            LEARNING_RATE).minimize(cost)
+
+        if mode == "train":
+            return x, y, train_step, out_layer, accuracy
+        elif mode == "test":
+            return x, y, accuracy, out_layer
 
     def __get_network_details(self):
         """Fetches Network details from Network Description file
@@ -213,11 +397,13 @@ class CONVNET(object):
         b = tf.get_variable(bias, [features], dtype=tf.float32,
                             initializer=initializer)
 
+        # print W
+        # print
         return W, b
 
     def __get_conv(self, input_x, weight, bias, kernel):
         """Returns a convolutional network layer"""
-
+        print weight
         layer = tf.nn.conv2d(input_x, weight, strides=[1, kernel, kernel, 1],
                              padding='SAME')
         layer = tf.nn.bias_add(layer, bias)
@@ -249,8 +435,21 @@ if __name__ == '__main__':
         print >> sys.stderr, "model_file_name train_folder_name\""
         exit(1)
 
+    if sys.argv[1] not in ['cross', 'cross-l1', 'cross-l2', 'ctest']:
+        print >> sys.stderr, "Cost must be one of the following: ",
+        print >> sys.stderr, "cross, cross-l1, cross-l2 or ctest"
+        exit(1)
+    # Check if data folder exists
+    if os.path.isdir(sys.argv[7]) is not True:
+        print >> sys.stderr, "No folder name " + sys.argv[3] + " found."
+        print >> sys.stderr, "Please enter a valid data folder name"
+        exit(1)
+
     CONV = CONVNET(sys.argv[1], sys.argv[3], sys.argv[4], sys.argv[5])
 
     CONV.set_inputs(sys.argv[7])
 
-    CONV.train(sys.argv[2])
+    if sys.argv[1] == 'ctest':
+        CONVV.test(sys.argv[6])
+    else:
+        CONV.cross_validation(5, sys.argv[6])
