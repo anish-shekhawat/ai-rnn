@@ -171,10 +171,15 @@ class CONVNET(object):
         W = {}
         b = {}
         prev_dim = 1
+        out_layer = x
 
         for i in range(len(network) - 1):
             W[i], b[i] = self.__get_wb(i, network[i][0], prev_dim,
                                        network[i][1], 'conv2d')
+            out_layer = self.__get_conv(out_layer, W[i], b[i], network[i][0])
+            prev_dim = network[i][1]
+
+        print network[-1]
 
     def __get_network_details(self):
         """Fetches Network details from Network Description file
